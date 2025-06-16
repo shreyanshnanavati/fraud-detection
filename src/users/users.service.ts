@@ -1,18 +1,25 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateUserDto } from '../common/dto/create-user.dto';
 import { PaginationDto } from '../common/dto/pagination.dto';
+import { Prisma } from '@prisma/client';
 
 @Injectable()
 export class UsersService {
   constructor(private prisma: PrismaService) {}
 
-  async create(createUserDto: CreateUserDto) {
+  async create(createUserDto: CreateUserDto, tx?: Prisma.TransactionClient) {
+    // Validate the data before creating
+    this.validateUserData(createUserDto);
+    
     const trustScore = this.calculateTrustScore(createUserDto);
-    return this.prisma.user.create({
+    const prisma = tx || this.prisma;
+    
+    return prisma.user.create({
       data: {
         ...createUserDto,
         trustScore,
+        ingestedAt: new Date(),
       },
     });
   }
@@ -77,25 +84,56 @@ export class UsersService {
     };
   }
 
+  private validateUserData(user: CreateUserDto) {
+    // Email validation
+    if (!user.email || !this.isValidEmail(user.email)) {
+      throw new BadRequestException('Invalid email format');
+    }
+
+    // Phone validation
+    if (!user.phone || !this.isValidPhone(user.phone)) {
+      throw new BadRequestException('Invalid phone number format');
+    }
+
+    // Full name validation
+    if (!user.fullName || user.fullName.trim().length < 2) {
+      throw new BadRequestException('Full name is required and must be at least 2 characters');
+    }
+  }
+
   private calculateTrustScore(user: CreateUserDto): number {
-    // Simple trust score calculation based on data quality
     let score = 1.0;
+    const deductions: number[] = [];
 
-    // Validate email format
-    if (!user.email?.includes('@')) {
-      score -= 0.2;
+    // Email validation
+    if (!this.isValidEmail(user.email)) {
+      deductions.push(0.3);
     }
 
-    // Validate phone number format
-    if (!user.phone || !user.phone.match(/^\+?[1-9]\d{1,14}$/)) {
-      score -= 0.2;
+    // Phone validation
+    if (!this.isValidPhone(user.phone)) {
+      deductions.push(0.3);
     }
 
-    // Validate PAN number format
-    // if (!user.panNumber || typeof user.panNumber !== 'string' || !user.panNumber.match(/^[A-Z]{5}[0-9]{4}[A-Z]{1}$/)) {
-    //   score -= 0.3;
-    // }
+    // Full name validation
+    if (!user.fullName || user.fullName.trim().length < 2) {
+      deductions.push(0.2);
+    }
 
-    return Math.max(0, score);
+    // Apply deductions
+    score -= deductions.reduce((sum, deduction) => sum + deduction, 0);
+
+    return Math.max(0, Math.min(1, score));
+  }
+
+  private isValidEmail(email: string): boolean {
+    const emailRegex = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/;
+    return emailRegex.test(email);
+  }
+
+  private isValidPhone(phone: string): boolean {
+    // Basic phone validation - allows international format
+    const phoneRegex = /^\+?[1-9]\d{1,14}$/;
+    return phoneRegex.test(phone);
   }
 }

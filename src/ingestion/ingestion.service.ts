@@ -6,6 +6,11 @@ import { Readable } from 'stream';
 import { UsersService } from '../users/users.service';
 import { ProcessedFilesService } from '../processed-files/processed-files.service';
 import { CreateUserDto } from '../common/dto/create-user.dto';
+import { PrismaService } from '../prisma/prisma.service';
+import { IngestionResult } from './interfaces/ingestion-result.interface';
+import { IngestionError } from './interfaces/ingestion-error.interface';
+import * as fs from 'fs';
+import * as path from 'path';
 
 @Injectable()
 export class IngestionService {
@@ -15,6 +20,7 @@ export class IngestionService {
     private readonly configService: ConfigService,
     private readonly usersService: UsersService,
     private readonly processedFilesService: ProcessedFilesService,
+    private readonly prisma: PrismaService,
   ) {}
 
   async ingestFromSource(url: string) {
@@ -39,32 +45,54 @@ export class IngestionService {
     }
   }
 
-  private async processStream(stream: Readable, filename: string, mapping?: Record<string, number>) {
+  private async processStream(stream: Readable, filename: string, mapping?: Record<string, number>): Promise<IngestionResult> {
     // Check if file was already processed
     const existingFile = await this.processedFilesService.findByFilename(filename);
     if (existingFile) {
       this.logger.log(`File ${filename} was already processed`);
-      return { message: 'File already processed', filename };
+      return {
+        success: [],
+        errors: [],
+        summary: {
+          totalRows: 0,
+          successfulRows: 0,
+          failedRows: 0,
+          filename,
+          processedAt: new Date(),
+        },
+      };
     }
 
-    const results = await this.processCsvStream(stream, filename, mapping);
-    await this.processedFilesService.create(filename);
+    const result = await this.processCsvStream(stream, filename, mapping);
+    
+    // Log errors to a file
+    if (result.errors.length > 0) {
+      await this.logErrorsToFile(filename, result.errors);
+    }
 
-    return {
-      message: 'Processing completed successfully',
-      filename,
-      processedRecords: results.length,
-    };
+    // Only create processed file record if we have successful results
+    if (result.success.length > 0) {
+      await this.processedFilesService.create(filename);
+    }
+
+    return result;
   }
 
-  private async processCsvStream(stream: Readable, filename: string, mapping?: Record<string, number>): Promise<any[]> {
-    const results: any[] = [];
+  private async processCsvStream(
+    stream: Readable, 
+    filename: string, 
+    mapping?: Record<string, number>
+  ): Promise<IngestionResult> {
+    const success: any[] = [];
+    const errors: IngestionError[] = [];
+    let rowNumber = 0;
     const csvOptions = mapping ? { headers: false } : undefined;
 
     return new Promise((resolve, reject) => {
       stream
         .pipe(csv(csvOptions))
         .on('data', async (data) => {
+          rowNumber++;
           try {
             let userDto: CreateUserDto;
             if (mapping) {
@@ -72,7 +100,6 @@ export class IngestionService {
                 fullName: data[mapping.fullName],
                 email: data[mapping.email],
                 phone: data[mapping.phone],
-                // panNumber: mapping.panNumber !== undefined ? data[mapping.panNumber] : '',
                 sourceFile: filename,
               };
             } else {
@@ -80,19 +107,77 @@ export class IngestionService {
                 fullName: data.Name || data.fullName,
                 email: data.Email || data.email,
                 phone: data.Phone || data.phone,
-                // panNumber: data.panNumber || '',
                 sourceFile: filename,
               };
             }
-            await this.usersService.create(userDto);
-            results.push(data);
+
+            const user = await this.usersService.create(userDto);
+            success.push(user);
           } catch (error) {
-            this.logger.error(`Error processing row: ${error.message}`);
+            const ingestionError: IngestionError = {
+              rowNumber,
+              rawData: data,
+              error: error.message,
+              validationErrors: this.extractValidationErrors(error),
+              timestamp: new Date(),
+            };
+            errors.push(ingestionError);
+            
+            // Log detailed error information
+            this.logger.error(
+              `Error processing row ${rowNumber} in file ${filename}: ${error.message}. Data: ${JSON.stringify(data)}, Validation Errors: ${JSON.stringify(ingestionError.validationErrors)}`
+            );
           }
         })
-        .on('end', () => resolve(results))
+        .on('end', () => {
+          resolve({
+            success,
+            errors,
+            summary: {
+              totalRows: rowNumber,
+              successfulRows: success.length,
+              failedRows: errors.length,
+              filename,
+              processedAt: new Date(),
+            },
+          });
+        })
         .on('error', (error) => reject(error));
     });
+  }
+
+  private extractValidationErrors(error: any): { field: string; message: string }[] {
+    if (error.response?.data?.message) {
+      // Handle class-validator errors
+      const messages = error.response.data.message;
+      if (Array.isArray(messages)) {
+        return messages.map((msg: string) => {
+          const [field, message] = msg.split(':').map(s => s.trim());
+          return { field, message };
+        });
+      }
+    }
+    return [];
+  }
+
+  private async logErrorsToFile(filename: string, errors: IngestionError[]): Promise<void> {
+    const errorLogPath = `logs/errors/${filename}_${new Date().toISOString()}.json`;
+    const errorLog = {
+      filename,
+      processedAt: new Date(),
+      errors,
+    };
+
+    // Ensure logs directory exists
+    const dir = path.dirname(errorLogPath);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+
+    // Write error log to file
+    fs.writeFileSync(errorLogPath, JSON.stringify(errorLog, null, 2));
+    
+    this.logger.log(`Error log written to ${errorLogPath}`);
   }
 
   private extractFilenameFromUrl(url: string): string {
