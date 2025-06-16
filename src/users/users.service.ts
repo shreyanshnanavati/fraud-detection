@@ -1,14 +1,16 @@
-import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
+import { Injectable, NotFoundException, BadRequestException, Logger } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateUserDto } from '../common/dto/create-user.dto';
 import { PaginationDto } from '../common/dto/pagination.dto';
-import { Prisma } from '@prisma/client';
+import { Prisma, User } from '@prisma/client';
 
 @Injectable()
 export class UsersService {
+  private readonly logger = new Logger(UsersService.name);
+
   constructor(private prisma: PrismaService) {}
 
-  async create(createUserDto: CreateUserDto, tx?: Prisma.TransactionClient) {
+  async create(createUserDto: CreateUserDto, tx?: Prisma.TransactionClient): Promise<User> {
     // Validate the data before creating
     this.validateUserData(createUserDto);
     
@@ -22,6 +24,25 @@ export class UsersService {
         ingestedAt: new Date(),
       },
     });
+  }
+
+  async bulkCreate(users: CreateUserDto[]): Promise<User[]> {
+    try {
+      const result = await this.prisma.$transaction(
+        users.map((user) =>
+          this.prisma.user.create({
+            data: {
+              ...user,
+              trustScore: 0, // Default trust score for new users
+            },
+          })
+        )
+      );
+      return result;
+    } catch (error) {
+      this.logger.error(`Error in bulk create: ${error.message}`);
+      throw error;
+    }
   }
 
   async findAll(paginationDto: PaginationDto) {

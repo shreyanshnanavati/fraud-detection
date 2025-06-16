@@ -2,6 +2,16 @@
 
 A NestJS-based backend system for managing verified user data with trust-based fraud prevention. This system processes user data from CSV files, calculates trust scores, and provides APIs for user management.
 
+## Features
+
+- **User Management**: Create, read, update, and delete user records
+- **Pagination**: Efficient data retrieval with pagination support
+- **Data Validation**: Robust input validation using class-validator
+- **Error Handling**: Comprehensive error handling and logging
+- **Database Integration**: Seamless integration with PostgreSQL using Prisma
+- **Optimized Ingestion**: High-performance CSV processing with batch operations, retry mechanisms, and memory-efficient streaming
+- **Performance Strategy**: Uses streaming and batch processing to handle large files efficiently - streaming prevents memory overflow while batching reduces database load by minimizing individual queries
+
 ## Key Features
 
 ### User Management
@@ -121,3 +131,4 @@ src/
 ├── users/          # User management
 └── app.module.ts   # Main application module
 ```
+

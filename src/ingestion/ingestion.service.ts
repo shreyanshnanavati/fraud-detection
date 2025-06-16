@@ -9,8 +9,8 @@ import { CreateUserDto } from '../common/dto/create-user.dto';
 import { PrismaService } from '../prisma/prisma.service';
 import { IngestionResult } from './interfaces/ingestion-result.interface';
 import { IngestionError } from './interfaces/ingestion-error.interface';
-import * as fs from 'fs';
-import * as path from 'path';
+import { ErrorLoggingService } from './error-logging.service';
+import { IngestionConfigService } from './ingestion.config';
 
 @Injectable()
 export class IngestionService {
@@ -21,11 +21,16 @@ export class IngestionService {
     private readonly usersService: UsersService,
     private readonly processedFilesService: ProcessedFilesService,
     private readonly prisma: PrismaService,
+    private readonly errorLoggingService: ErrorLoggingService,
+    private readonly ingestionConfig: IngestionConfigService,
   ) {}
 
   async ingestFromSource(url: string) {
     try {
-      const response = await axios.get(url, { responseType: 'stream' });
+      const response = await axios.get(url, { 
+        responseType: 'stream',
+        timeout: this.ingestionConfig.timeout 
+      });
       const filename = this.extractFilenameFromUrl(url);
       return this.processStream(response.data, filename);
     } catch (error) {
@@ -65,13 +70,8 @@ export class IngestionService {
 
     const result = await this.processCsvStream(stream, filename, mapping);
     
-    // Log errors to a file
-    if (result.errors.length > 0) {
-      await this.logErrorsToFile(filename, result.errors);
-    }
-
     // Only create processed file record if we have successful results
-    if (result.success.length > 0) {
+    if (result.summary.successfulRows > 0) {
       await this.processedFilesService.create(filename);
     }
 
@@ -83,9 +83,10 @@ export class IngestionService {
     filename: string, 
     mapping?: Record<string, number>
   ): Promise<IngestionResult> {
-    const success: any[] = [];
     const errors: IngestionError[] = [];
     let rowNumber = 0;
+    let totalSuccess = 0;
+    let currentBatch: CreateUserDto[] = [];
     const csvOptions = mapping ? { headers: false } : undefined;
 
     return new Promise((resolve, reject) => {
@@ -111,8 +112,14 @@ export class IngestionService {
               };
             }
 
-            const user = await this.usersService.create(userDto);
-            success.push(user);
+            currentBatch.push(userDto);
+
+            // Process batch when it reaches the batch size
+            if (currentBatch.length >= this.ingestionConfig.batchSize) {
+              await this.processBatchWithRetry(currentBatch, filename);
+              totalSuccess += currentBatch.length;
+              currentBatch = [];
+            }
           } catch (error) {
             const ingestionError: IngestionError = {
               rowNumber,
@@ -122,20 +129,22 @@ export class IngestionService {
               timestamp: new Date(),
             };
             errors.push(ingestionError);
-            
-            // Log detailed error information
-            this.logger.error(
-              `Error processing row ${rowNumber} in file ${filename}: ${error.message}. Data: ${JSON.stringify(data)}, Validation Errors: ${JSON.stringify(ingestionError.validationErrors)}`
-            );
+            await this.errorLoggingService.logError(filename, ingestionError);
           }
         })
-        .on('end', () => {
+        .on('end', async () => {
+          // Process remaining batch
+          if (currentBatch.length > 0) {
+            await this.processBatchWithRetry(currentBatch, filename);
+            totalSuccess += currentBatch.length;
+          }
+
           resolve({
-            success,
+            success: [], // We don't keep success records in memory anymore
             errors,
             summary: {
               totalRows: rowNumber,
-              successfulRows: success.length,
+              successfulRows: totalSuccess,
               failedRows: errors.length,
               filename,
               processedAt: new Date(),
@@ -144,6 +153,23 @@ export class IngestionService {
         })
         .on('error', (error) => reject(error));
     });
+  }
+
+  private async processBatchWithRetry(batch: CreateUserDto[], filename: string): Promise<void> {
+    let retries = 0;
+    while (retries < this.ingestionConfig.maxRetries) {
+      try {
+        await this.usersService.bulkCreate(batch);
+        return;
+      } catch (error) {
+        retries++;
+        if (retries === this.ingestionConfig.maxRetries) {
+          this.logger.error(`Failed to process batch after ${retries} retries: ${error.message}`);
+          throw error;
+        }
+        await new Promise(resolve => setTimeout(resolve, this.ingestionConfig.retryDelay));
+      }
+    }
   }
 
   private extractValidationErrors(error: any): { field: string; message: string }[] {
@@ -158,26 +184,6 @@ export class IngestionService {
       }
     }
     return [];
-  }
-
-  private async logErrorsToFile(filename: string, errors: IngestionError[]): Promise<void> {
-    const errorLogPath = `logs/errors/${filename}_${new Date().toISOString()}.json`;
-    const errorLog = {
-      filename,
-      processedAt: new Date(),
-      errors,
-    };
-
-    // Ensure logs directory exists
-    const dir = path.dirname(errorLogPath);
-    if (!fs.existsSync(dir)) {
-      fs.mkdirSync(dir, { recursive: true });
-    }
-
-    // Write error log to file
-    fs.writeFileSync(errorLogPath, JSON.stringify(errorLog, null, 2));
-    
-    this.logger.log(`Error log written to ${errorLogPath}`);
   }
 
   private extractFilenameFromUrl(url: string): string {
