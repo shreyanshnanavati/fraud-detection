@@ -45,17 +45,66 @@ export class UsersService {
     }
   }
 
+  /**
+   * Retrieves a paginated list of users with optional filtering.
+   * 
+   * @param paginationDto - Pagination and filtering parameters
+   * @returns Object containing:
+   *   - data: Array of user records
+   *   - meta: Pagination metadata (total, page, limit, totalPages)
+   * 
+   * @example
+   * // Get users with trust score between 0.5 and 0.8
+   * const result = await findAll({
+   *   page: 1,
+   *   limit: 10,
+   *   filters: {
+   *     minTrustScore: 0.5,
+   *     maxTrustScore: 0.8
+   *   }
+   * });
+   * 
+   * @example
+   * // Search users by email domain
+   * const result = await findAll({
+   *   page: 1,
+   *   limit: 10,
+   *   filters: {
+   *     email: 'example.com'
+   *   }
+   * });
+   */
   async findAll(paginationDto: PaginationDto) {
-    const { page = 1, limit = 10 } = paginationDto;
+    const { page = 1, limit = 10, filters } = paginationDto;
     const skip = (page - 1) * limit;
+
+    const where: Prisma.UserWhereInput = {};
+    
+    if (filters) {
+      if (filters.minTrustScore !== undefined || filters.maxTrustScore !== undefined) {
+        where.trustScore = {
+          ...(filters.minTrustScore !== undefined && { gte: filters.minTrustScore }),
+          ...(filters.maxTrustScore !== undefined && { lte: filters.maxTrustScore }),
+        };
+      }
+      
+      if (filters.email) {
+        where.email = { contains: filters.email, mode: 'insensitive' };
+      }
+      
+      if (filters.panNumber) {
+        where.panNumber = { contains: filters.panNumber, mode: 'insensitive' };
+      }
+    }
 
     const [users, total] = await Promise.all([
       this.prisma.user.findMany({
+        where,
         skip,
         take: limit,
         orderBy: { createdAt: 'desc' },
       }),
-      this.prisma.user.count(),
+      this.prisma.user.count({ where }),
     ]);
 
     return {
@@ -122,6 +171,42 @@ export class UsersService {
     }
   }
 
+  /**
+   * Calculates the trust score for a user based on various data points and validations.
+   * 
+   * Current Implementation:
+   * - Starts with a base score of 1.0
+   * - Deducts points for invalid or missing data:
+   *   - Invalid email: -0.3 points
+   *   - Invalid phone: -0.3 points
+   *   - Invalid/Short full name: -0.2 points
+   * 
+   * Future Evolution Plans:
+   * 1. Data Completeness (Q2 2024)
+   *    - Additional points for complete profile information
+   *    - Bonus for verified government IDs
+   *    - Points for profile picture verification
+   * 
+   * 2. Historical Behavior (Q3 2024)
+   *    - Transaction history analysis
+   *    - Account age and activity metrics
+   *    - Pattern recognition for suspicious activities
+   * 
+   * 3. External Verifications (Q4 2024)
+   *    - Integration with credit bureaus
+   *    - Social media verification
+   *    - Professional network validation
+   * 
+   * 4. Machine Learning Integration (2025)
+   *    - Anomaly detection
+   *    - Risk prediction models
+   *    - Dynamic scoring based on user behavior patterns
+   * 
+   * The final score is normalized between 0 and 1, where:
+   * - 0.8-1.0: High trust
+   * - 0.5-0.8: Medium trust
+   * - 0.0-0.5: Low trust (flagged for review)
+   */
   private calculateTrustScore(user: CreateUserDto): number {
     let score = 1.0;
     const deductions: number[] = [];

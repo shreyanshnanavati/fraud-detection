@@ -20,6 +20,41 @@ A NestJS-based backend system for managing verified user data with trust-based f
 - Paginated user listing and filtering
 - User statistics and summary endpoints
 
+### Trust Score System
+
+#### Current Implementation
+The trust score system starts with a base score of 1.0 and evaluates user data quality:
+- Invalid email: -0.3 points
+- Invalid phone: -0.3 points
+- Invalid/Short full name: -0.2 points
+
+The final score is normalized between 0 and 1:
+- 0.8-1.0: High trust
+- 0.5-0.8: Medium trust
+- 0.0-0.5: Low trust (flagged for review)
+
+#### Future Evolution Plans
+
+1. Data Completeness
+   - Additional points for complete profile information
+   - Bonus for verified government IDs
+   - Points for profile picture verification
+
+2. Historical Behavior
+   - Transaction history analysis
+   - Account age and activity metrics
+   - Pattern recognition for suspicious activities
+
+3. External Verifications
+   - Integration with credit bureaus
+   - Social media verification
+   - Professional network validation
+
+4. Machine Learning Integration
+   - Anomaly detection
+   - Risk prediction models
+   - Dynamic scoring based on user behavior patterns
+
 ### Data Ingestion
 - CSV file ingestion with validation
 - Automatic trust score calculation
